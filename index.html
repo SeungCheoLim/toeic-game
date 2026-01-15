@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
@@ -30,11 +30,6 @@
 <body class="bg-slate-50 text-slate-800">
     <div id="root"></div>
 
-    <!-- 
-      FIX: data-type="module" 속성을 추가했습니다. 
-      이 속성은 Babel에게 이 스크립트가 ES Module(import/export)을 사용함을 알려주어, 
-      require()로 변환하지 않고 브라우저가 import를 직접 처리하도록 합니다.
-    -->
     <script type="text/babel" data-type="module">
         // --- Firebase Configuration ---
         const firebaseConfig = {
@@ -58,11 +53,8 @@
         const auth = getAuth(app);
 
         // React Hooks & Components
-        // React는 UMD로 로드되었으므로 전역 객체에서 가져옵니다.
         const { useState, useEffect, useRef } = React;
         
-        // Lucide 아이콘은 전역 객체 lucide를 사용하며, 컴포넌트 내부에서 createIcons()를 호출합니다.
-
         // --- Game Data ---
         const QUESTION_BANK = {
             beginner: [
@@ -114,21 +106,31 @@
             // Auth & Icon Init
             useEffect(() => {
                 lucide.createIcons();
-                signInAnonymously(auth).then((userCredential) => {
-                    setUser(userCredential.user);
-                    console.log("Signed in anonymously");
-                }).catch((error) => console.error("Auth Error", error));
+                // 앱 시작 시 로그인 시도
+                signInAnonymously(auth)
+                    .then((userCredential) => {
+                        setUser(userCredential.user);
+                        console.log("초기 로그인 성공:", userCredential.user.uid);
+                    })
+                    .catch((error) => console.error("초기 로그인 실패 (나중에 재시도함):", error));
             }, []);
 
             // Leaderboard Real-time Listener
             useEffect(() => {
                 if (gameState === 'leaderboard' || gameState === 'result') {
+                    // 쿼리 단순화 (복합 쿼리 인덱스 문제 방지)
+                    // limit만 사용하고 정렬은 클라이언트에서 처리할 수도 있으나, 여기선 기본 orderBy 시도
                     const q = query(collection(db, "leaderboard"), orderBy("score", "desc"), limit(50));
+                    
                     const unsubscribe = onSnapshot(q, (snapshot) => {
                         const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                         setLeaderboard(data);
                     }, (error) => {
                         console.error("Leaderboard Error:", error);
+                        // 권한 오류 등이 발생하면 빈 배열로 처리
+                        if (error.code === 'permission-denied') {
+                             alert("데이터베이스 권한 오류입니다. Firebase Console > Firestore Database > Rules를 확인해주세요.");
+                        }
                     });
                     return () => unsubscribe();
                 }
@@ -146,7 +148,6 @@
                 setTimer(LEVELS[selectedLevel].time);
             };
 
-            // Timer Logic
             useEffect(() => {
                 if (gameState === 'playing' && !isAnswered && timer > 0) {
                     timerRef.current = setTimeout(() => setTimer(p => p - 1), 1000);
@@ -191,30 +192,47 @@
                 }
             };
 
+            // FIX: 점수 제출 로직 강화
             const submitScore = async () => {
                 if (!nickname.trim()) return alert("닉네임을 입력해주세요!");
-                if (!user) return alert("네트워크 연결을 확인해주세요.");
                 
                 setIsSubmitting(true);
+                
+                // 1. 현재 로그인 상태 확인 및 재연결 시도
+                let currentUser = user;
+                if (!currentUser) {
+                    try {
+                        console.log("로그인 재시도 중...");
+                        const credential = await signInAnonymously(auth);
+                        currentUser = credential.user;
+                        setUser(currentUser);
+                    } catch (authError) {
+                        console.error("로그인 실패:", authError);
+                        setIsSubmitting(false);
+                        return alert("서버 연결에 실패했습니다. \nFirebase Console > Authentication > Sign-in method 탭에서 'Anonymous(익명)' 공급업체가 '사용 설정됨' 상태인지 꼭 확인해주세요!");
+                    }
+                }
+
+                // 2. 데이터 저장 시도
                 try {
                     await addDoc(collection(db, "leaderboard"), {
                         nickname: nickname.trim(),
                         score: score,
                         level: LEVELS[level].name,
-                        uid: user.uid,
+                        uid: currentUser.uid,
                         createdAt: serverTimestamp()
                     });
                     setIsSubmitting(false);
                     setGameState('leaderboard');
                 } catch (e) {
-                    console.error(e);
-                    alert("점수 저장 실패: " + e.message);
+                    console.error("저장 에러:", e);
                     setIsSubmitting(false);
+                    alert("점수 저장 실패: " + e.message + "\n(Firestore 규칙이 읽기/쓰기 허용으로 되어 있는지 확인해주세요)");
                 }
             };
 
-            // --- Views ---
-
+            // --- UI Components ---
+            
             const MenuScreen = () => (
                 <div className="flex flex-col items-center justify-center min-h-screen p-4 animate-fade-in">
                     <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-md w-full text-center border-t-8 border-indigo-600">
@@ -247,7 +265,7 @@
 
             const GameScreen = () => {
                 const q = QUESTION_BANK[level][currentQIndex];
-                useEffect(() => lucide.createIcons(), [isAnswered, currentQIndex]); // Refresh icons
+                useEffect(() => lucide.createIcons(), [isAnswered, currentQIndex]);
 
                 return (
                     <div className="min-h-screen flex flex-col items-center justify-center p-4 animate-fade-in">
